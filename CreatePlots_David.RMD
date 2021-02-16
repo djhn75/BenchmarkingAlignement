@@ -1,0 +1,395 @@
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("tximport")
+```
+
+
+```{r}
+library(Seurat)
+library(tximport)
+```
+
+```{r}
+#' Import Single cell sequencing experiments into Seurat3and perform normalisation and scale Data 
+#' @author David John
+#' @param pathways A vector of pathways to the cellrancer count output folder (contains barcodes.tsv, genes.tsv, matrix.mtx)
+#' @param ids Vector of strings that are assigned to the concordant cells
+#' @return Merged seurat object
+Importer <- function(pathway,id, method="star", performNormalisation=TRUE, performScaling = FALSE,performVariableGeneDetection=TRUE, FilterCells=TRUE, FilterByAbsoluteValues=FALSE) {
+  if (method=="10x") {
+    Matrix <- Read10X(pathway)
+  }else if (method=="alevin") {
+    cat("Method=Alevin","\n")
+    Matrix<-tximport(paste0(pathway, "quants_mat.gz"), type="alevin")$counts
+  }else if (method=="kalisto") {
+    cat("Method=Kalisto","\n")
+    Matrix<-Read10X(pathway)
+  }
+  else if (method=="star"){
+    Matrix <- read.table(pathway,header = TRUE,sep = ",", dec = ".", row.names = 1)
+  }
+  else {
+    stop("Error: unknown sequencing method, please us either star,10x oralevin")
+  }
+  cat("Create Seurat Object","\n")
+  seuratObject =CreateSeuratObject(counts = Matrix, project = id, min.cells = 5)
+  seuratObject$sample <- id
+  tmp<-unlist(strsplit(id,split = "-"))
+  seuratObject$condition <- paste0(tmp[1:length(tmp)-1],collapse = "-")
+
+  cat("Get Percent Mito","\n")
+  mito.features <- grep(pattern = "^MT-", x = rownames(x = seuratObject), value = TRUE)
+  if (length(mito.features)<10) {
+    mito.features <- grep(pattern = "^mt-", x = rownames(x = seuratObject), value = TRUE)
+  }
+  if (length(mito.features)<10) {
+    stop("Error: Could not find MT genes \n")
+  }
+
+  percent.mito <- Matrix::colSums(x = GetAssayData(object = seuratObject, slot = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = seuratObject, slot = 'counts'))
+  seuratObject$percent.mito <- percent.mito
+
+  cat("Generate QCs","\n")
+  #write QC to file
+  svg(paste0(pathway,"QC_preFiltered.svg"))
+  gg_preFiltering<-VlnPlot(object = seuratObject, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3, pt.size = 0,)
+
+  print(gg_preFiltering)
+  dev.off()
+  cat("start Filtering","\n")
+  if (FilterCells==TRUE) {
+    if (FilterByAbsoluteValues==TRUE) {
+      seuratObject<-FilterDeadCells(seuratObject = seuratObject)
+    }
+    else {
+      tmp<-FilterDeadCellsByQuantile(seuratObject = seuratObject, lowQuantile = 0.1, highQuantile = 0.95)
+      seuratObject<-tmp[[1]]
+      svg(paste0(pathway,"QC_QuantileFiltering.svg"))
+      print(tmp[[2]])
+      dev.off()
+      gg_preFiltering<-tmp[[2]]
+      
+    }
+    
+  }
+  if (performNormalisation==TRUE) {
+    seuratObject<-NormalizeData(object = seuratObject,verbose = FALSE)
+  }
+  if(performVariableGeneDetection==TRUE){
+    seuratObject<-FindVariableFeatures(object = seuratObject, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+  }
+  if (performScaling==TRUE) {
+    seuratObject<-ScaleData(object = seuratObject)
+  }
+  cat("Imported ", length(seuratObject@meta.data$orig.ident), " cells from ", pathway, "with ID ", id, "\n")
+  return(list(seuratObject, gg_preFiltering))
+}
+
+```
+
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("DropletUtils")
+BiocManager::install("BUSpaRse")
+BiocManager::install("BiocParallel")
+
+```
+
+
+#1.) Import Data
+##1.1 )import PBMC
+### 1.1.1) Alevin
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/pbmc/sample1/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/pbmc/sample2/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/pbmc/sample3/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/pbmc/sample4/alevin/")
+
+Samplenames<-c("PBMC-A-1","PBMC-A-2","PBMC-A-3","PBMC-A-4")
+```
+
+```{r}
+files<-"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/pbmc/sample1/alevin/quants_mat.gz"
+txi <- tximport(files, type="alevin")
+pbmc <- CreateSeuratObject(counts = txi$counts , min.cells = 3, min.features = 200, project = "10X_PBMC")
+```
+
+```{r}
+tmpList<-list()
+PBMC.A.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "alevin")
+  print(tmpList[[2]])
+  PBMC.A.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+### 1.1.2) Kalisto
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/pbmc/sample1/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/pbmc/sample2/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/pbmc/sample3/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/pbmc/sample4/counting/filtered_matrix_emptyDrops/")
+
+Samplenames<-c("PBMC-K-1","PBMC-K-2","PBMC-K-3","PBMC-K-4")
+```
+
+
+```{r}
+tmpList<-list()
+PBMC.K.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "kalisto")
+  print(tmpList[[2]])
+  PBMC.K.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+
+##1.2.) Import Cardiac
+###1.2.1.) Alevin
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17010/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17013/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17014/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17015/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17016/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17017/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Cardiac/MF17018/alevin/")
+
+Samplenames<-c("Card-A-10","Card-A-13","Card-A-14","Card-A-15","Card-A-16","Card-A-17","Card-A-18")
+```
+
+
+```{r}
+tmpList<-list()
+Card.A.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "alevin")
+  print(tmpList[[2]])
+  Card.A.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+###1.2.2.) Kalisto
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17010/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17013/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17014/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17015/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17016/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17017/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Cardiac/MF17018/counting/filtered_matrix_emptyDrops/")
+
+Samplenames<-c("Card-K-10","Card-K-13","Card-K-14","Card-K-15","Card-K-16","Card-K-17","Card-K-18")
+```
+
+
+```{r}
+tmpList<-list()
+Card.K.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "kalisto")
+  print(tmpList[[2]])
+  Card.K.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+
+##1.2.) Import Endothelial
+###1.2.1.) Alevin
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Brain/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Colon/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Heart/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Kidney/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Liver/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Lung/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/muscle_EDL/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/muscle_Soleus/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Small_Intestine/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Spleen/alevin/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Alevin/Endothelial/Testis/alevin/"
+  )
+
+Samplenames<-c(
+  "End-A-Brain","End-A-Colon","End-A-Heart","End-A-Kidney",
+  "End-A-Liver","End-A-Lung", "End-A-mu_EDL","End-A-mu_Sol",
+  "End-A-Intest","End-A-Spleen","End-A-Testis")
+```
+
+
+```{r}
+tmpList<-list()
+End.A.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "alevin")
+  print(tmpList[[2]])
+  End.A.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+###1.2.2.) Kalisto
+```{r}
+Sample.Paths <- c(
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Brain/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Colon/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Heart/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Kidney/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Liver/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Lung/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/muscle_EDL/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/muscle_Soleus/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Small_Intestine/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Spleen/counting/filtered_matrix_emptyDrops/",
+"/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Mapping/Kallisto/Endothelial/Testis/counting/filtered_matrix_emptyDrops/")
+
+Samplenames<-c("End-K-Brain","End-K-Colon","End-K-Heart","End-K-Kidney",
+               "End-K-Liver","End-K-Lung","End-K-mu_EDL","End-K-mu_Sol",
+               "End-K-Intest","End-K-Spleen","End-K-Testis")
+```
+
+
+```{r}
+tmpList<-list()
+End.K.SeuratObjectList <- list()
+for (i in 1:length(Sample.Paths)) {
+  tmpList<-Importer(pathway = Sample.Paths[i],id = Samplenames[i], FilterCells = FALSE, method = "kalisto")
+  print(tmpList[[2]])
+  End.K.SeuratObjectList[[i]]<-tmpList[[1]]
+}
+```
+
+#2.)Generate Barplot
+##combine data
+```{r}
+library(Seurat)
+PBMC.A.Seurat<-merge(PBMC.A.SeuratObjectList)
+
+PBMC.A.Seurat <- Reduce(function(x,y) merge(x,y) , PBMC.A.SeuratObjectList)
+PBMC.A.Seurat$mapper<-"Alevin"
+PBMC.K.Seurat <- Reduce(function(x,y) merge(x,y) , PBMC.K.SeuratObjectList)
+PBMC.K.Seurat$mapper<-"Kalisto"
+
+
+Card.A.Seurat <- Reduce(function(x,y) merge(x,y) , Card.A.SeuratObjectList)
+Card.A.Seurat$mapper<-"Alevin"
+Card.K.Seurat <- Reduce(function(x,y) merge(x,y) , Card.K.SeuratObjectList)
+Card.K.Seurat$mapper<-"Kalisto"
+
+End.A.Seurat <- Reduce(function(x,y) merge(x,y) , End.A.SeuratObjectList)
+End.A.Seurat$mapper<-"Alevin"
+End.K.Seurat <- Reduce(function(x,y) merge(x,y) , End.K.SeuratObjectList)
+End.K.Seurat$mapper<-"Kalisto"
+
+```
+
+```{r}
+PBMC.A.Seurat$sample<-"PBMC"
+PBMC.K.Seurat$sample<-"PBMC"
+
+Card.A.Seurat$sample<-"Card"
+Card.K.Seurat$sample<-"Card"
+
+End.A.Seurat$sample<-"End"
+End.K.Seurat$sample<-"End"
+```
+
+```{r}
+SeuratObjectList<-list(PBMC.A.Seurat,PBMC.K.Seurat,Card.A.Seurat,Card.K.Seurat,End.A.Seurat,End.K.Seurat)
+SeurObj<- Reduce(function(x,y) merge(x,y) , SeuratObjectList)
+
+```
+#clean up
+```{r}
+rm(PBMC.A.Seurat,PBMC.A.SeuratObjectList, PBMC.K.Seurat, PBMC.K.SeuratObjectList,
+   Card.A.Seurat,Card.A.SeuratObjectList, Card.K.Seurat, Card.K.SeuratObjectList,
+   End.A.Seurat, End.A.SeuratObjectList, End.K.Seurat, End.K.SeuratObjectList)
+
+rm(tmp,tmpList,SeuratObjectList, Sample.Paths, Samplenames, i)
+table(SeurObj$orig.ident)
+```
+
+
+##2.1.) Get genes per Cell
+```{r}
+SeurObj$mapper[is.na(SeurObj$mapper)]<-"Kalisto"
+
+v$Mapper[is.na(v$Mapper)]<-"Kalisto"
+v <- data.frame(Mapper=SeurObj$mapper, Sample=SeurObj$sample, PerMT=SeurObj$percent.mito, nFeature=SeurObj$nFeature_RNA, nCount=SeurObj$nCount_RNA)
+
+v$Mapper<-factor(v$Mapper, levels = c("Alevin","Kalisto"))
+v$nFeature<-as.integer(v$nFeature)
+
+p<-ggplot(v, aes(x=Sample, y=nFeature, fill=Mapper)) + 
+  geom_boxplot(outlier.colour="black", outlier.shape=NA,
+                outlier.size=0.1, notch = TRUE) + 
+  stat_summary(fun.y=mean, geom="point", shape=23, size=4)
+
+```
+
+
+##2.2.) Gett Cell Count
+```{r}
+table(v$Mapper,v$Sample)
+
+df<-data.frame(Names=names(table(SeurObj$orig.ident)), CellCount=as.integer(table(SeurObj$orig.ident)))
+df$sample<-sub('-.*', '', df$Names)
+df$Mapper<-sub('.*-([A,K])-.*', '\\1', df$Names)
+p<-ggplot(df, aes(x=sample, y=CellCount, fill=Mapper)) + 
+  geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=23, size=4)
+```
+
+
+
+
+#3 Barplot with filtered Data
+##nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mito < 0.2
+
+```{r}
+SeurObj.filt <- subset(x = SeurObj, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mito < 0.2)
+
+```
+##2.1.) Get genes per Cell
+```{r}
+v <- data.frame(Mapper=SeurObj.filt$mapper, Sample=SeurObj.filt$sample, PerMT=SeurObj.filt$percent.mito, nFeature=SeurObj.filt$nFeature_RNA, nCount=SeurObj.filt$nCount_RNA)
+p<-ggplot(v, aes(x=Sample, y=nFeature, fill=Mapper)) + 
+  geom_boxplot(outlier.colour="black", outlier.shape=NA,
+                outlier.size=0.1, notch = TRUE) + 
+  stat_summary(fun.y=mean, geom="point", shape=23, size=4)
+p
+```
+
+
+##2.2.) Gett Cell Count
+```{r}
+df<-data.frame(Names=names(table(SeurObj.filt$orig.ident)), CellCount=as.integer(table(SeurObj.filt$orig.ident)))
+df$sample<-sub('-.*', '', df$Names)
+df$Mapper<-sub('.*-([A,K])-.*', '\\1', df$Names)
+p<-ggplot(df, aes(x=sample, y=CellCount, fill=Mapper)) + 
+  geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=23, size=4)
+p
+```
+
+
+
+```{r}
+genes<-data.frame(rownames(SeurObj@assays$RNA))
+```
+
+
+
+```{r}
+save.image("/media/Helios_scStorage/Ralf/Benchmark/DavidRuns/Workspace.RData")
+```
+
